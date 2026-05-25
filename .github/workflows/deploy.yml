@@ -1,34 +1,131 @@
-name: Deploy Website
+name: CI/CD Pipeline
 
 on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-
-  deploy:
-
+  validate:
+    name: Validate source
     runs-on: ubuntu-latest
 
     steps:
-
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Verify required files
+        run: |
+          test -f index.html
+          test -f styles.css
+
+      - name: Validate HTML entrypoint
+        run: |
+          grep -q "<title>Scania CI/CD Demo</title>" index.html
+          grep -q 'href="styles.css"' index.html
+
+      - name: Check local asset references
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          grep -Eo '(href|src)="[^"]+"' index.html | cut -d'"' -f2 | while read -r asset; do
+            case "$asset" in
+              http*|mailto:*|tel:*|\#*) continue ;;
+            esac
+
+            if [ ! -f "$asset" ]; then
+              echo "Missing local asset: $asset"
+              exit 1
+            fi
+          done
+
+  test:
+    name: Static smoke tests
+    runs-on: ubuntu-latest
+    needs: validate
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run smoke tests
+        run: |
+          grep -q "Scania CI/CD Demo" index.html
+          grep -q "Deployment Successful" index.html
+          grep -q ".container" styles.css
+          grep -q ".status" styles.css
+
+  build:
+    name: Build static site
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create build output
+        run: |
+          rm -rf dist
+          mkdir -p dist
+          cp index.html styles.css dist/
+          touch dist/.nojekyll
+
+      - name: Verify build output
+        run: |
+          test -s dist/index.html
+          test -s dist/styles.css
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-site
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    name: Deploy to GitHub Pages
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: static-site
+          path: dist
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v4
 
-      - name: Upload Website Files
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
 
         with:
-          path: '.'
+          path: dist
 
       - name: Deploy to GitHub Pages
         id: deployment
